@@ -1,0 +1,444 @@
+---
+title: "527-Final-Project"
+author: "Chris Chen"
+date: "2023-05-20"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Preliminaries
+
+```{r}
+library(pdfCluster)
+library(meanShiftR)
+library(ggplot2)
+library(ggpubr)
+library(cluster)
+data = read.csv("project-data.csv", header = FALSE)
+```
+
+
+## Data Exploration
+
+```{r}
+# for (i in 1:ncol(data)) {
+#   hist(data[, i])
+# }
+range = matrix(NA, nrow = 64, ncol = 3)
+for (i in 1:ncol(data)) {
+  range[i, 1] = min(data[, i])
+  range[i, 2] = mean(data[, i])
+  range[i, 3] = max(data[, i])
+}
+```
+
+All features have approximately 0 mean but they have different ranges. The distributions are approximately normal except for the first two features. No obvious influential points. 
+
+
+## Dimension Reduction
+
+Why? Because 64 dimension is too many. 1. theoretically, there're no neighbors in high dimensionality; 2. realistically, our poor computers can't run those clustering algorithms on such huge dimensions.
+
+How? Consider PCA, ICA, tSNE, and UMAP. These are the most widely used dimension reduction methods in the industry that are related to clusterings. 
+
+To how many dimensions? Let's make it two. Retains important information, better for visualization, and faster run time for our algorithms.
+
+How do we select the final dimension reduction method? We want: 1. logically makes sense; 2. gives nice clusters in 2D.
+
+
+### PCA
+
+```{r}
+pca1 = prcomp(data)
+z1 = pca1$x[, pca1$sdev[1:2]]
+pcv = ggplot(as.data.frame(z1), mapping = aes(x = PC1, y = PC2)) + geom_point()
+```
+
+Not good. 1. We don't know if it logically makes sense, since PCA assumes that there's a linear relationship between features.  
+
+2. The variance of the first two PCs are not too much different from the rest; the plot of the data is crowded--no clear clusters.
+
+
+### ICA
+
+```{r}
+library(ica)
+ica1 = icafast(data, 2, center = TRUE)
+ic1 = ica1$Y[, 1]
+ic2 = ica1$Y[, 2]
+df2 = as.data.frame(cbind(ic1, ic2))
+icv = ggplot(df2, mapping = aes(x = ic1, y = ic2)) + geom_point()
+```
+
+Not good. 1. It doesn't make sense logically, since ICA assumes that non of the features are gaussian. However, we've seen that about 62 out of 64 features are somewhat Gaussian.  
+
+2. The plot of the data is crowded--no clear clusters. Just like that of PCA.
+
+
+### tSNE
+
+```{r}
+library(Rtsne)
+set.seed(666)
+tsne1 = Rtsne(data, dims = 2, perplexity = 50)
+e1 = tsne1$Y[, 1]
+e2 = tsne1$Y[, 2]
+df3 = as.data.frame(cbind(e1, e2))
+tsnev = ggplot(df3, mapping = aes(x = e1, y = e2)) + geom_point()
+```
+
+Looks good. 1. No linearity assumption is made, and it's not straightforwardly wrong to model the distance between two points to be proportional to probability density under a Gaussian centered at one of them. However, t-SNE only retains local structure and does not retain global structure.
+
+2. It gives relatively clear clusters, but the distance between clusters are quite small. Probably due to the fact that the global structure is not retained.
+
+
+### UMAP
+
+```{r}
+library(uwot)
+set.seed(1)
+umap1 = umap(data, n_components = 2, metric = "manhattan")
+u = as.data.frame(umap1)
+umapv = ggplot(u, mapping = aes(x = V1, y = V2)) + geom_point()
+```
+
+Looks good. 1. No linearity assumption is made. Both local structure and global structure of the data are retained. 
+
+2. It gives very clear clusters. It seems that there are approximately 6 to 8 (if we treat the upper middle cluster and the upper right cluster as two) clusters. How to give an objective "best" answer? We use silhouette score to determine.
+
+```{r}
+ggarrange(pcv, icv, labels = c("PCA", "ICA"), ncol = 2, nrow = 1)
+ggarrange(tsnev, umapv, labels = c("t-SNE", "UMAP"), ncol = 2, nrow = 1)
+```
+
+
+```{r}
+library(factoextra)
+# fviz_nbclust(u, clara, method = "silhouette") + theme_classic()
+# fviz_nbclust(u, clara, method = "gap_stat")
+```
+
+
+## Level Set with KDE
+
+```{r}
+library(ks)
+hpi(as.matrix(u))
+t1 = Sys.time()
+delta = pdfCluster(u, hmult = 1, h = c(1.2, 1), n.grid = 200)
+t2 = Sys.time()
+time = t2 - t1
+```
+
+```{r}
+hmus = c(1, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6)
+mccs = rep(0, 7)
+for (i in 1:7) {
+  delta2 = pdfCluster(u, hmult = hmus[i], h = c(1.2, 1))
+  mccs[i] = max(groups(delta2))
+}
+```
+
+```{r}
+df = as.data.frame(cbind(u, k = groups(delta)))
+ggplot(df, mapping = aes(x = V1, y = V2, color = as.factor(k))) + geom_point() + theme(legend.position = "none")
+write.csv(groups(delta), "alg1_out.txt", row.names = FALSE, col.names = FALSE)
+```
+
+The result looks really good. We have 8 distinct clusters. The two unexpected clustering are the upper right (treated as one) and the lower right (treated as two), the rest results are as expected. The computing time is extremely long (25 minutes): the kernel density estimation takes too much time. This makes it extremely hard to do parameter tuning for Level Set Clustering with KDE.
+
+```{r}
+lset_mat = delta@nc[["id"]]
+n_unclus = rep(0, ncol(lset_mat))
+for (i in 1:ncol(lset_mat)) {
+  n_unclus[i] = sum(lset_mat[, i] == -1)
+}
+n_unclus
+```
+
+
+### Algorithm Convergence
+
+```{r}
+tms = mcs = rep(0, 20)
+for (i in 1:20) {
+  t1 = Sys.time()
+  delta2 = pdfCluster(u, hmult = 0.5*i)
+  t2 = Sys.time()
+  tms[i] = t2 - t1
+  mcs[i] = max(groups(delta2))
+}
+par(mfrow = c(1, 2))
+plot(x = 0.5*(1:20), y = tms, type = "b", xlab = "hmult", ylab = "runtime")
+plot(x = 0.5*(1:20), y = mcs, type = "b", xlab = "hmult", ylab = "number of clusters")
+```
+
+Zoom in on 0.5 to 1.5:
+
+```{r}
+hmts = seq(0.5, 1.5, length.out = 20)
+mcs2 = rep(0, 20)
+for (i in 1:20) {
+  delta2 = pdfCluster(u, hmult = hmts[i])
+  mcs2[i] = max(groups(delta2))
+}
+plot(x = hmts, y = mcs2, type = "b", xlab = "h", ylab = "number of clusters")
+```
+
+```{r}
+ngr = c(100, 200, 500, 1000, 2000, 5000, 10000)
+maxxxs = rep(0, 7)
+for (i in 1:7) {
+  delta_temp = pdfCluster(u, hmult = 1, h = c(1.2, 1), n.grid = ngr[i])
+  maxxxs[i] = max(groups(delta_temp))
+}
+```
+
+
+## Mean Shift
+
+```{r}
+delta_p = meanShift(umap1, bandwidth = c(1.2, 1), iterations = 100)
+df_p = as.data.frame(cbind(u, k = delta_p$assignment))
+ggplot(df_p, mapping = aes(x = V1, y = V2, color = as.factor(k))) + geom_point() + theme(legend.position = "none") 
+write.csv(unname(unlist(delta_p$assignment)), "alg2_out.txt", row.names = FALSE)
+```
+
+
+### Parameter Tuning
+
+```{r}
+library(cluster)
+dm = dist(u, method = "manhattan")
+sil1 = silhouette(x = as.integer(delta_p$assignment), dist = dm)
+summary(sil1)[[1]][4]
+h1s = h2s = c(0.1, 0.2, 0.5, 1, 2, 5)
+sil = c()
+for (i in 1:6) {
+  for (j in 1:6) {
+    clus_temp = meanShift(umap1, bandwidth = c(h1s[i], h2s[j]), iterations = 100)
+    sil_temp = silhouette(x = as.integer(clus_temp$assignment), dist = dm)
+    sil = append(sil, summary(sil_temp)[[1]][4])
+  }
+}
+sils = as.numeric(unname(unlist(sil)))
+max(sils, na.rm = T)
+which.max(sils)
+
+```
+
+```{r}
+h1s2 = h2s2 = seq(1, 1.5, length.out = 6)
+sil2 = c()
+for (i in 1:6) {
+  for (j in 1:6) {
+    clus_temp = meanShift(umap1, bandwidth = c(h1s2[i], h2s2[j]), iterations = 100)
+    sil_temp = silhouette(x = as.integer(clus_temp$assignment), dist = dm)
+    sil2 = append(sil2, summary(sil_temp)[[1]][4])
+  }
+}
+sils2 = as.numeric(unname(unlist(sil2)))
+max(sils2, na.rm = T)
+which.max(sils2)
+```
+
+```{r}
+h1s3 = h2s3 = seq(0.6, 1, length.out = 5)
+sil3 = c()
+for (i in 1:5) {
+  for (j in 1:5) {
+    clus_temp = meanShift(umap1, bandwidth = c(h1s3[i], h2s3[j]), iterations = 100)
+    sil_temp = silhouette(x = as.integer(clus_temp$assignment), dist = dm)
+    sil3 = append(sil3, summary(sil_temp)[[1]][4])
+  }
+}
+sils3 = as.numeric(unname(unlist(sil3)))
+max(sils3, na.rm = T)
+which.max(sils3)
+```
+
+
+### Algorithm Convergence
+
+```{r}
+times = mxcls = rep(0, 20)
+for (i in 1:20) {
+  t1 = Sys.time()
+  delta_t = meanShift(umap1, iterations = 5 * i)
+  t2 = Sys.time()
+  times[i] = t2 - t1
+  mxcls[i] = max(delta_t$assignment)
+}
+par(mfrow = c(1, 2))
+plot(x = 5*(1:20), y = times, type = "b", xlab = "iterations", ylab = "runtime")
+plot(x = 5*(1:20), y = mxcls, type = "b", xlab = "iterations", ylab = "number of clusters")
+```
+
+Without parameter tuning there will be too many clusters. 20 iterations give 178 clusters, take 19s. 100 iterations give 6 clusters, take 57s. 
+
+The clustering result looks fantastic: the number of clusters converges to 6--which is what we would expect based on looking at the visualization. The speed is also fast--for this dataset, the runtime caps at 1 minute.  
+
+
+## External Validation
+
+### Confusion Matrix
+
+```{r}
+library(caret)
+M = confusionMatrix(as.factor(delta_p$assignment), as.factor(groups(delta)))
+M$table
+```
+
+
+### Mis-classification Error and Jaccard Index 
+
+```{r}
+get_dME = function(table) {
+  sum = 0
+  nr = min(nrow(table), ncol(table))
+  for (i in 1:nr) {
+    sum = sum + max(table[i, ])
+  }
+  dME = 1 - sum / 12000
+  return(dME)
+}
+get_dME(M$table)
+library(fossil)
+library(mclust)
+rand.index(as.numeric(delta_p$assignment), as.numeric(groups(delta)))
+```
+
+```{r}
+X_1_tilde = matrix(NA, ncol = 6, nrow = 12000)
+for (i in 1:12000) {
+  c = delta_p$assignment[i]
+  for (j in 1:6) {
+    if (j == c) {
+      X_1_tilde[i, j] = 1
+    } else {
+      X_1_tilde[i, j] = 0
+    }
+  }
+}
+X_2_tilde = matrix(NA, ncol = 7, nrow = 12000)
+for (i in 1:12000) {
+  c = groups(delta)[i]
+  for (j in 1:7) {
+    if (j == c) {
+      X_2_tilde[i, j] = 1
+    } else {
+      X_2_tilde[i, j] = 0
+    }
+  }
+}
+Z1 = X_1_tilde %*% t(X_1_tilde)
+Z2 = X_2_tilde %*% t(X_2_tilde)
+jacc = 0.5 * (sum(Z1 == Z2) - 12000) / (12000 * 11999 / 2); jacc
+```
+
+
+## Internal Validation
+
+### Instability
+
+```{r}
+set.seed(500)
+B = 10
+asmts = matrix(nrow = 12000, ncol = B)
+for (b in 1:B) {
+  samp = sample(1:12000, 12000, replace = TRUE)
+  d_samp = data[samp, ]
+  u1 = umap(d_samp, n_components = 2, metric = "manhattan")
+  d1s = meanShift(u1, bandwidth = c(1.2, 1), iterations = 100)
+  asmts[, b] = d1s$assignment
+}
+```
+
+
+```{r, warning = FALSE}
+rands = c()
+for (i in 1:(B-1)) {
+  for (j in (i+1):B) {
+    l1 = as.numeric(asmts[, i])
+    # m1 = max(asmts[, i])
+    l2 = as.numeric(asmts[, j])
+    # m2 = max(asmts[, j])
+    # if (m1 <= m2) {
+    #   M = caret::confusionMatrix(l1, l2)
+    # } else {
+    #   M = caret::confusionMatrix(l2, l1)
+    # }
+    rands = append(rands, rand.index(l1, l2))
+  }
+}
+mean(rands)
+```
+
+```{r}
+set.seed(500)
+asmts2 = matrix(nrow = 12000, ncol = B)
+for (b in 1:B) {
+  samp = sample(1:12000, 12000, replace = TRUE)
+  d_samp = data[samp, ]
+  u1 = umap(d_samp, n_components = 2, metric = "manhattan")
+  d1s = pdfCluster(u, hmult = 1, h = c(1.2, 1))
+  asmts2[, b] = groups(d1s)
+}
+```
+
+```{r, warning = FALSE}
+rands2 = c()
+for (i in 1:(B-1)) {
+  for (j in (i+1):B) {
+    l1 = as.numeric(asmts2[, i])
+    # m1 = max(asmts[, i])
+    l2 = as.numeric(asmts2[, j])
+    # m2 = max(asmts[, j])
+    # if (m1 <= m2) {
+    #   M = caret::confusionMatrix(l1, l2)
+    # } else {
+    #   M = caret::confusionMatrix(l2, l1)
+    # }
+    rands2 = append(rands2, rand.index(l1, l2))
+  }
+}
+mean(rands2)
+```
+
+
+```{r}
+library(dbscan)
+dm = dist(data, method = "manhattan")
+set.seed(1)
+ep = seq(0.5, 1.5, length.out = 11)
+db = rep(0, 11)
+for (i in 1:11) {
+  temp = dbscan(u, eps = ep[i])
+  db[i] = max(temp[["cluster"]])
+}
+delta_db = dbscan(data, eps = 1.5)[["cluster"]]
+df_db = as.data.frame(cbind(u, k = delta_db))
+ggplot(df_db, mapping = aes(x = V1, y = V2, color = as.factor(k))) + geom_point()
+```
+
+
+```{r}
+set.seed(1)
+delta_k = kmeans(data, 9)
+df_k = as.data.frame(cbind(u, k = delta_k$cluster))
+ggplot(df_k, mapping = aes(x = V1, y = V2, color = as.factor(k))) + geom_point() + theme(legend.position = "none")
+```
+
+```{r}
+set.seed(500)
+delta_h = hclust(dm)
+clusterCut = cutree(delta_h, 10)
+df_h = as.data.frame(cbind(u, k = clusterCut))
+ggplot(df_h, mapping = aes(x = V1, y = V2, color = as.factor(k))) + geom_point() + theme(legend.position = "none")
+```
+
+
